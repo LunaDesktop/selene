@@ -378,6 +378,32 @@ fn local_coords(state: &State, slot: usize, pos: (f64, f64)) -> (f64, f64) {
     }
 }
 
+/// Wysyła bieżącą selekcję do klienta, do którego należy okno `slot`.
+///
+/// Protokół wymaga, aby `wl_data_device.selection` dotarło **bezpośrednio
+/// przed** `wl_keyboard.enter`: klienci (GTK, Xwayland) unieważniają ofertę po
+/// utracie fokusu. Wysyłanie selekcji wyłącznie przy jej zmianie powodowało, że
+/// po przełączeniu okna wklejanie nie miało ważnej oferty — działało tylko
+/// wewnątrz jednej aplikacji i między aplikacjami libLuny, które trzymają
+/// ofertę niezależnie od fokusu.
+pub fn send_selection_for_slot(state: &mut State, slot: usize) {
+    // Martwe źródło (klient zakończył się bez `destroy`) nie może być oferowane.
+    if state
+        .selection
+        .as_ref()
+        .is_some_and(|source| !source.is_alive())
+    {
+        state.selection = None;
+    }
+    let Some(device) = target_device(state, slot) else {
+        return;
+    };
+    let Some(handle) = state.display_handle.clone() else {
+        return;
+    };
+    send_selection(&handle, &device, state.selection.as_ref());
+}
+
 /// Rozsyła bieżącą selekcję do **wszystkich** urządzeń klientów.
 ///
 /// Nie pomijamy źródła: Wayland pozwala mu otrzymać własną ofertę, a libLuna

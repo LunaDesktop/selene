@@ -1937,6 +1937,9 @@ pub(crate) fn set_keyboard_focus(state: &mut State, slot: usize) {
     }
     state.keyboard_focus = None;
     if let Some(surface) = state.slots.get(slot).cloned() {
+        // Protokół: `wl_data_device.selection` musi dotrzeć bezpośrednio przed
+        // `wl_keyboard.enter` (klienci unieważniają ofertę po utracie fokusu).
+        crate::data::send_selection_for_slot(state, slot);
         if let Some(kb) = keyboard_for(state, &surface) {
             let serial = state.next_serial();
             let _ = kb.send_event(wl_keyboard::Event::Enter {
