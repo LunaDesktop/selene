@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zależności systemowe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config build-essential libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libxcursor-dev libfontconfig1-dev libfreetype6-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Pakiet
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          mkdir -p dist
+          for bin in selene; do
+            cp "target/release/$bin" dist/
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+          tar -czf "${GITHUB_REPOSITORY#*/}-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" -C dist .
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.tar.gz"
+          generate_release_notes: true
