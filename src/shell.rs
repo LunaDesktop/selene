@@ -172,6 +172,8 @@ impl Dispatch<xdg_surface::XdgSurface, XdgSurfaceData> for State {
                 let popup = data_init.init(id, ());
                 *data.popup.lock_or_recover() = Some(popup);
                 *data.is_popup.lock_or_recover() = true;
+                // `parent` to `xdg_surface` rodzica — zapamiętujemy jego `wl_surface`
+                // (po nim `popup_position` znajduje okno i prostokąt kotwicy).
                 *data.parent.lock_or_recover() = parent
                     .as_ref()
                     .and_then(|p| p.data::<XdgSurfaceData>())

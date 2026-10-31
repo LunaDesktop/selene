@@ -55,6 +55,12 @@ pub struct SurfaceData {
     /// Ostatni obraz **własnego** bufora (bez dzieci) — potrzebny do przemalowania
     /// rodzica, gdy dziecko w trybie `desync` zrobi commit.
     pub base_image: Mutex<Option<std::sync::Arc<ImageData>>>,
+    /// Czy klient faktycznie rysuje własne dekoracje (CSD). Ustawiane raz, gdy
+    /// bufor okaże się większy od geometrii okna o cienie CSD — Chrome/Ecosia
+    /// potwierdzają `server_side`, ale i tak rysują własny pasek. Flaga zostaje
+    /// na całe życie powierzchni, żeby po maksymalizacji (cienie znikają) nie
+    /// wrócił podwójny pasek tytułu.
+    pub csd: Mutex<bool>,
 }
 
 impl SurfaceData {
@@ -74,6 +80,7 @@ impl SurfaceData {
             subsurface: Mutex::new(None),
             children: Mutex::new(Vec::new()),
             base_image: Mutex::new(None),
+            csd: Mutex::new(false),
         }
     }
 
@@ -311,6 +318,13 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
             }
         }
         for slot in slots {
+            let was_popup = state
+                .windows
+                .lock_or_recover()
+                .get(slot)
+                .map(|w| w.popup)
+                .unwrap_or(false);
+            let was_focused = state.keyboard_focus.as_ref().map(|(s, _)| *s) == Some(slot);
             if let Some(win) = state.windows.lock_or_recover().get_mut(slot) {
                 win.mapped = false;
                 win.minimized = false;
@@ -323,6 +337,10 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
             }
             // Fokus nie może wskazywać na powierzchnię, której już nie ma.
             crate::seat::clear_focus_if(state, slot);
+            // Menu zniknęło — klawiatura wraca do okna rodzica, a nie zostaje „martwa”.
+            if was_focused && was_popup {
+                crate::seat::refocus_after_popup(state);
+            }
             if std::env::var("SELENE_STATS").is_ok() {
                 eprintln!("selene/win: powierzchnia zniszczona slot={slot}");
             }
@@ -330,6 +348,38 @@ impl Dispatch<wl_surface::WlSurface, SurfaceData> for State {
         // Pasek (foreign-toplevel) dowiaduje się, że okno zniknęło.
         crate::foreign_toplevel::close_for_data(data);
     }
+}
+
+/// Czy klient znany z rysowania własnych dekoracji na Waylandzie.
+///
+/// Chromium (Chrome, Ecosia, Edge, Brave…) potwierdza `server_side`, ale i tak
+/// rysuje własny pasek z przyciskami. Dodatkowy pasek zasłaniał ich kontrolki
+/// i przechwytywał kliknięcia w menu ⋮. Rozpoznajemy po `app_id`/tytule, żeby
+/// działało też dla okien startujących od razu zmaksymalizowanych (bez cieni CSD).
+fn known_csd_client(app_id: &str, title: &str) -> bool {
+    let id = app_id.to_ascii_lowercase();
+    const IDS: &[&str] = &[
+        "google-chrome",
+        "chromium",
+        "ecosia",
+        "microsoft-edge",
+        "brave-browser",
+        "vivaldi",
+        "opera",
+    ];
+    if IDS.iter().any(|needle| id.contains(needle)) {
+        return true;
+    }
+    let title = title.to_ascii_lowercase();
+    [
+        "google chrome",
+        "ecosia browser",
+        "microsoft edge",
+        "brave browser",
+        "vivaldi",
+    ]
+    .iter()
+    .any(|needle| title.contains(needle))
 }
 
 /// Czy rysujemy nasze dekoracje (pasek tytułu) dla tego okna.
@@ -474,6 +524,18 @@ fn composite(
                 .map(|td| *td.deco.lock_or_recover())
         })
         .flatten();
+    // `app_id` klienta — potrzebne do rozpoznania przeglądarek z własnymi dekoracjami.
+    let app_id = xdg_surface
+        .as_ref()
+        .and_then(|xs| xs.data::<XdgSurfaceData>())
+        .and_then(|d| {
+            d.toplevel
+                .lock_or_recover()
+                .as_ref()
+                .and_then(|tl| tl.data::<XdgToplevelData>())
+                .map(|td| td.app_id.lock_or_recover().clone())
+        })
+        .unwrap_or_default();
     // Nasze dekoracje (SSD, tj. pasek tytułu) rysujemy:
     //  * oknom X11 — Xwayland sam nic nie rysuje (czeka na menedżera okien),
     //  * klientom Waylanda, które negocjowały tryb `server_side`.
@@ -484,6 +546,12 @@ fn composite(
     } else {
         wants_ssd(false, is_popup, deco_mode)
     };
+    // X11: Chrome i pochodne domyślnie rysują własny pasek i nie zawsze ustawiają
+    // `_MOTIF_WM_HINTS` przed pierwszym mapowaniem — nie dokładamy im drugiego.
+    let mut ssd = ssd;
+    if is_x11 && ssd && !is_popup && known_csd_client("", &title) {
+        ssd = false;
+    }
     // Widoczna geometria (`xdg_surface.set_window_geometry`). Okna z własnymi
     // dekoracjami (GTK/libadwaita, Firefox, Electron) mają bufor większy od okna
     // o cienie CSD. Model trzyma **widoczny** prostokąt (to on idzie w `configure`
@@ -531,6 +599,20 @@ fn composite(
     } else {
         ((0.0, 0.0), (bw, bh))
     };
+    // Klient, który mimo negocjacji `server_side` rysuje własne dekoracje, ma bufor
+    // większy od geometrii okna o cienie CSD (`image_offset`). Dokładanie naszego
+    // paska dawało wtedy **podwójny tytuł**, a jego strefa przechwytywała kliknięcia
+    // w przyciski klienta (Chrome/Ecosia: menu ⋮, ustawienia, minimalizacja).
+    // Wykrywamy to raz i pamiętamy na całe życie powierzchni — przy maksymalizacji
+    // cienie znikają, ale pasek klienta zostaje.
+    if ssd
+        && !is_x11
+        && !is_popup
+        && (off_x > 0.5 || off_y > 0.5 || known_csd_client(&app_id, &title))
+    {
+        *data.csd.lock_or_recover() = true;
+    }
+    let ssd = ssd && !*data.csd.lock_or_recover();
     // Popup: pełne pozycjonowanie wg `xdg_positioner` (kotwica, grawitacja, flip/slide).
     // Menu i palety poleceń (Zed, VS Code, GTK) dostają wreszcie właściwe miejsce.
     let popup_pos = if is_popup {
@@ -597,6 +679,30 @@ fn composite(
         win.dmabuf = dmabuf.clone();
         pos = (win.x, win.y);
     }
+    // Popup musi leżeć **nad** rodzicem także po ponownym pokazaniu. Klient często
+    // używa tej samej powierzchni menu; kliknięcie w okno podnosi je wyżej, a menu
+    // zostaje pod spodem — widać je, ale żaden klik w niego nie dociera.
+    if is_popup {
+        let parent_slot = xdg_surface
+            .as_ref()
+            .and_then(|xs| xs.data::<XdgSurfaceData>())
+            .and_then(|d| d.parent.lock_or_recover().clone())
+            .and_then(|parent| {
+                parent
+                    .data::<SurfaceData>()
+                    .and_then(|sd| *sd.slot.lock_or_recover())
+            });
+        if let Some(parent_slot) = parent_slot {
+            let candidate = state.next_z();
+            let mut windows = state.windows.lock_or_recover();
+            let parent_z = windows.get(parent_slot).map(|w| w.z).unwrap_or(i32::MIN);
+            if let Some(win) = windows.get_mut(slot) {
+                if win.z <= parent_z {
+                    win.z = candidate;
+                }
+            }
+        }
+    }
     if created {
         if let Some(db) = &dmabuf {
             if std::env::var("SELENE_STATS").is_ok() {
@@ -650,10 +756,19 @@ fn composite(
             }
         }
     }
-    // Popup: wyślij konfigurację (rozmiar + pozycja **względem geometrii rodzica**).
+    // Popup: wyślij konfigurację (rozmiar + pozycję **względem geometrii rodzica**).
+    // Zwykle zrobiliśmy to już przy pierwszym commicie bez bufora; tutaj tylko
+    // awaryjnie dla klientów, które od razu podpinają bufor.
     if is_popup && created {
-        if let (Some(xs), Some((abs, origin))) = (xdg_surface.as_ref(), popup_pos) {
-            send_popup_configure(state, xs, (abs.0 - origin.0, abs.1 - origin.1), w, h);
+        let configured = xdg_surface
+            .as_ref()
+            .and_then(|xs| xs.data::<XdgSurfaceData>())
+            .map(|d| *d.configured.lock_or_recover())
+            .unwrap_or(false);
+        if !configured {
+            if let (Some(xs), Some((abs, origin))) = (xdg_surface.as_ref(), popup_pos) {
+                send_popup_configure(state, xs, (abs.0 - origin.0, abs.1 - origin.1), w, h);
+            }
         }
     }
     // Okno X11: powiedz klientowi, ile miejsca zabiera nasz pasek tytułu
@@ -1095,6 +1210,21 @@ mod ssd_tests {
         // Brak obiektu dekoracji → brak naszego paska.
         assert!(!wants_ssd(false, false, None));
     }
+
+    #[test]
+    fn chromium_browsers_are_recognized_as_client_decorated() {
+        // Chrome/Ecosia potwierdzają `server_side`, ale rysują własny pasek.
+        assert!(known_csd_client(
+            "google-chrome",
+            "Bez tytułu - Google Chrome"
+        ));
+        assert!(known_csd_client("ecosia-browser", "New Tab"));
+        assert!(known_csd_client("", "Welcome ! – Ecosia Browser"));
+        assert!(known_csd_client("microsoft-edge", ""));
+        // Zwykłe aplikacje zachowują nasz pasek.
+        assert!(!known_csd_client("eu.luna.Store", "Sklep"));
+        assert!(!known_csd_client("org.gnome.Nautilus", "Pliki"));
+    }
 }
 
 /// Dodaje nowe okno lub aktualizuje istniejące (slot trzymany w [`SurfaceData`]).
@@ -1317,6 +1447,18 @@ fn maybe_configure_xdg(state: &mut State, data: &SurfaceData) {
         return;
     };
     if *xdg_data.is_popup.lock_or_recover() {
+        // Popup czeka na `configure` **przed** pierwszym buforem — bez tego klienty
+        // takie jak Chrome/GTK nie pokażą menu w ogóle (albo pokażą je bez wejścia).
+        // Rozmiar bierzemy z `xdg_positioner`; pozycję z geometrii rodzica.
+        if *xdg_data.configured.lock_or_recover() {
+            return;
+        }
+        let geom = *xdg_data.geom.lock_or_recover();
+        let w = geom.width.max(1);
+        let h = geom.height.max(1);
+        let ((ax, ay), (ox, oy)) =
+            popup_position(state, &xdg_surface, (f64::from(w), f64::from(h)));
+        send_popup_configure(state, &xdg_surface, (ax - ox, ay - oy), w, h);
         return;
     }
     if *xdg_data.configured.lock_or_recover() {

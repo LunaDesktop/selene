@@ -518,6 +518,58 @@ fn dismiss_popups(state: &mut State, pos: Point) {
             w.mapped = false;
         }
     }
+    // Klawiatura nie może zostać na zamkniętym popupie — wraca do okna pod nim.
+    // Sprawdzamy **po** pętli: przy submenu może zostać jeszcze otwarte menu rodzica,
+    // do którego fokus ma wrócić dopiero wtedy, gdy zniknie cała hierarchia.
+    let focus_dead = state
+        .keyboard_focus
+        .as_ref()
+        .map(|(s, _)| *s)
+        .map(|s| {
+            state
+                .windows
+                .lock_or_recover()
+                .get(s)
+                .map(|w| w.popup && !w.mapped)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if focus_dead {
+        refocus_after_popup(state);
+    }
+}
+
+/// Po zamknięciu popupu przywraca klawiaturę: najpierw nadrzędnemu menu (submenu),
+/// a gdy żadne menu nie zostało — najwyższemu zwykłemu oknu.
+///
+/// Bez tego fokus zostawał na ukrytej powierzchni menu i klawiatura „martwiła się”
+/// po wybraniu pozycji lub kliknięciu poza menu.
+pub(crate) fn refocus_after_popup(state: &mut State) {
+    let ws = *state.ws_current.lock_or_recover();
+    let slot = {
+        let windows = state.windows.lock_or_recover();
+        // Nadrzędne menu (submenu właśnie się zamknęło) ma pierwszeństwo przed oknem.
+        let top_popup = windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.popup && w.mapped && !w.minimized && w.in_workspace(ws))
+            .max_by_key(|(_, w)| w.z)
+            .map(|(i, _)| i);
+        top_popup.or_else(|| {
+            windows
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| {
+                    w.mapped && !w.minimized && !w.layer && !w.popup && w.in_workspace(ws)
+                })
+                .max_by_key(|(_, w)| w.z)
+                .map(|(i, _)| i)
+        })
+    };
+    match slot {
+        Some(slot) => set_keyboard_focus(state, slot),
+        None => set_keyboard_focus(state, usize::MAX),
+    }
 }
 
 /// Okno docelowe dla punktu (publiczne dla drag & drop).
