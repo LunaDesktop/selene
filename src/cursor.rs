@@ -35,8 +35,12 @@ pub fn set_surface(
 ) {
     match surface {
         None => {
+            // NULL w `set_cursor` oznacza **ukrycie** kursora (protokół
+            // wl_pointer), a nie powrót do strzałki. Gry (np. 0 A.D.) i
+            // odtwarzacze rysują własny kursor i chowają systemowy —
+            // wcześniej nad ich obrazem zostawała domyślna strzałka.
             state.cursor_surface = None;
-            *state.cursor_image.lock_or_recover() = CursorImage::Default;
+            *state.cursor_image.lock_or_recover() = CursorImage::Hidden;
         }
         Some(surface) => {
             state.cursor_surface = Some(surface.clone());
@@ -133,8 +137,18 @@ pub fn resolve(image: &CursorImage) -> (Arc<ImageData>, (i32, i32)) {
     match image {
         CursorImage::Custom { data, hotspot } => (Arc::clone(data), *hotspot),
         CursorImage::Shape(name) => shape(name).unwrap_or_else(default_arrow),
+        CursorImage::Hidden => hidden_image(),
         CursorImage::Default => default_arrow(),
     }
+}
+
+/// Przezroczysty 1×1 px — "kursor ukryty" bez specjalnego przypadku
+/// w płaszczyźnie sprzętowej i w rysowaniu sceny.
+fn hidden_image() -> (Arc<ImageData>, (i32, i32)) {
+    static HIDDEN: OnceLock<(Arc<ImageData>, (i32, i32))> = OnceLock::new();
+    HIDDEN
+        .get_or_init(|| (Arc::new(ImageData::new(1, 1, vec![0, 0, 0, 0])), (0, 0)))
+        .clone()
 }
 
 /// Czy obraz zmieści się na płaszczyźnie sprzętowej.
@@ -358,5 +372,13 @@ mod tests {
         let mut scene = Scene::new();
         paint(&mut scene, Point::new(10.0, 10.0));
         assert!(!scene.is_empty());
+    }
+
+    #[test]
+    fn hidden_cursor_is_transparent() {
+        let (image, hotspot) = resolve(&CursorImage::Hidden);
+        assert_eq!((image.width, image.height), (1, 1));
+        assert_eq!(hotspot, (0, 0));
+        assert!(image.rgba.iter().all(|byte| *byte == 0));
     }
 }

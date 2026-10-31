@@ -1029,6 +1029,10 @@ fn pointer_leave(state: &mut State) {
         }
     }
     state.pointer_focus = None;
+    // Kursor należał do klienta, który właśnie stracił wskaźnik. Nie pokazujemy
+    // jego kształtu nad inną aplikacją — nowy klient ustawi własny.
+    state.cursor_surface = None;
+    *state.cursor_image.lock_or_recover() = CursorImage::Default;
 }
 
 /// Zamyka grupę zdarzeń wskaźnika (`wl_pointer.frame`, protokół ≥ 5).
@@ -1105,6 +1109,11 @@ fn update_pointer_focus(state: &mut State, pos: Point) {
     if same {
         return;
     }
+    let old_client = state
+        .pointer_focus
+        .as_ref()
+        .and_then(|(_, surface)| surface.client())
+        .map(|client| client.id());
     if let Some((_, surface)) = state.pointer_focus.clone() {
         if let Some(ptr) = pointer_for(state, &surface) {
             let serial = state.next_serial();
@@ -1113,6 +1122,17 @@ fn update_pointer_focus(state: &mut State, pos: Point) {
         }
     }
     state.pointer_focus = None;
+    // Zmiana klienta: stary kształt (np. kursor gry albo Flatpaka) nie może
+    // "przykleić się" do nowego okna. Reset przed `enter` — nowy klient
+    // ustawi własny kursor w `wl_pointer.set_cursor`.
+    let new_client = target
+        .and_then(|slot| state.slots.get(slot))
+        .and_then(|surface| surface.client())
+        .map(|client| client.id());
+    if old_client != new_client {
+        state.cursor_surface = None;
+        *state.cursor_image.lock_or_recover() = CursorImage::Default;
+    }
     if let Some(slot) = target {
         if let Some(surface) = state.slots.get(slot).cloned() {
             let serial = state.next_serial();

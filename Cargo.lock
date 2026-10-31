@@ -536,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "selene"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "libc",
  "libluna-core",

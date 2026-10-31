@@ -265,6 +265,8 @@ pub type CursorModel = Arc<Mutex<Option<Point>>>;
 /// albo bufor dostarczony przez klienta (`wl_pointer.set_cursor`).
 #[derive(Clone, PartialEq)]
 pub enum CursorImage {
+    /// Klient ukrył kursor (`wl_pointer.set_cursor` z NULL) — np. gry i odtwarzacze.
+    Hidden,
     Default,
     Shape(String),
     Custom {
@@ -276,6 +278,7 @@ pub enum CursorImage {
 impl std::fmt::Debug for CursorImage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Hidden => f.write_str("hidden"),
             Self::Default => f.write_str("default"),
             Self::Shape(name) => write!(f, "shape:{name}"),
             Self::Custom { data, hotspot } => write!(
