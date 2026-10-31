@@ -1,0 +1,53 @@
+[package]
+name = "selene"
+version = "0.0.9"
+edition = "2021"
+license = "GPL-3.0-or-later"
+rust-version = "1.80"
+authors = ["Patryk Szkudlarek / libLuna contributors"]
+description = "Selene — kompozytor Wayland środowiska Luna (bez smithay; własna implementacja na wayland-server)."
+# repository = "https://github.com/mijsys/selene"
+
+[workspace]
+resolver = "2"
+
+[[bin]]
+name = "selene"
+path = "src/main.rs"
+
+[dependencies]
+libluna-core = { path = "../libluna/crates/libluna-core", version = "0.0.5" }
+libluna-render = { path = "../libluna/crates/libluna-render", version = "0.0.5" }
+libluna-i18n = { path = "../libluna/crates/libluna-i18n", version = "0.0.5" }
+libluna-platform = { path = "../libluna/crates/libluna-platform", version = "0.0.5" }
+libluna-widgets = { path = "../libluna/crates/libluna-widgets", version = "0.0.5" }
+
+wayland-server = "0.31"
+wayland-protocols = { version = "0.32", features = ["server", "unstable", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["server"] }
+rustix = { version = "0.38", features = ["event", "fs", "time", "mm"] }
+x11rb = { version = "0.14.0", features = ["composite"] }
+xkbcommon = { version = "0.7", default-features = false }
+# Motywy kursorów XCursor (kształty dla `wp_cursor_shape_v1`) — ta sama biblioteka,
+# której używa `libluna-platform`.
+xcursor = "0.3"
+libc = "0.2"
+
+[dev-dependencies]
+# Klient Waylanda używany wyłącznie przez `examples/subsurface-probe.rs` —
+# integracyjny test `wl_subcompositor` bez zewnętrznych aplikacji.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+smithay-client-toolkit = "0.19"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
