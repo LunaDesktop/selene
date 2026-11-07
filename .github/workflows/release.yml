@@ -63,6 +63,6 @@ jobs:
         packaging/luna-session:/usr/bin/luna-session:755
         packaging/selene.desktop:/usr/share/wayland-sessions/selene.desktop:644
       branding: true
-      deb_depends: "libc6,libxkbcommon0,libxcursor1,libwayland-client0,xkb-data"
-      rpm_depends: "glibc,libxkbcommon,libXcursor,libwayland-client,xkeyboard-config"
-      arch_depends: "glibc,libxkbcommon,libxcursor,wayland,xorg-xkeyboard-config"
+      deb_depends: "libc6,libxkbcommon0,libxcursor1,libwayland-client0,xkb-data,libluna"
+      rpm_depends: "glibc,libxkbcommon,libXcursor,libwayland-client,xkeyboard-config,libluna"
+      arch_depends: "glibc,libxkbcommon,libxcursor,wayland,xorg-xkeyboard-config,libluna"
