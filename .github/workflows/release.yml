@@ -51,3 +51,18 @@ jobs:
         with:
           files: "*.tar.gz"
           generate_release_notes: true
+
+  distro:
+    needs: build
+    uses: LunaDesktop/luna/.github/workflows/distro-packages.yml@main
+    with:
+      package: "selene"
+      description: "Selene — kompozytor Wayland środowiska Luna"
+      binaries: "selene"
+      files: |
+        packaging/luna-session:/usr/bin/luna-session:755
+        packaging/selene.desktop:/usr/share/wayland-sessions/selene.desktop:644
+      branding: true
+      deb_depends: "libc6,libxkbcommon0,libxcursor1,libwayland-client0,xkb-data"
+      rpm_depends: "glibc,libxkbcommon,libXcursor,libwayland-client,xkeyboard-config"
+      arch_depends: "glibc,libxkbcommon,libxcursor,wayland,xorg-xkeyboard-config"

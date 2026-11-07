@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Luna
+Name[pl]=Luna
+Comment=Luna desktop — Selene Wayland compositor
+Comment[pl]=Środowisko Luna — kompozytor Wayland Selene
+Exec=luna-session
+TryExec=selene
+DesktopNames=Luna
