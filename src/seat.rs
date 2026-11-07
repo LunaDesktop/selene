@@ -34,9 +34,10 @@ use crate::sync::LockExt;
 /// Ile pikseli powierzchni odpowiada jednemu „ząbkowi” kółka myszy (`REL_WHEEL`).
 ///
 /// `wl_pointer.axis` przenosi wartości w jednostkach powierzchni, a evdev daje ±1 na
-/// obrót — dlatego mnożymy. Wartość dobrana tak, by jeden obrót przewijał ~1 wiersz
-/// listy (~60 px) po uwzględnieniu mnożnika w powłoce.
-const WHEEL_STEP_PX: f64 = 20.0;
+/// obrót — dlatego mnożymy. [`libluna_core::SCROLL_NOTCH_PX`] to ten sam krok,
+/// którego używają aplikacje libLuny, więc jeden obrót przewija dokładnie wiersz
+/// (a klienty GTK/Electron dostają standardowe ~64 px).
+const WHEEL_STEP_PX: f64 = libluna_core::SCROLL_NOTCH_PX;
 
 /// Buduje tekst mapy klawiszy XKB dla danego układu (i opcjonalnego wariantu).
 ///
@@ -1110,8 +1111,10 @@ fn pointer_axis(state: &mut State, dx: f64, dy: f64) {
     // a evdev daje „ząbki” (±1). Skalujemy więc ząbek do [`WHEEL_STEP_PX`] px —
     // inaczej klienci (a nasza powłoka) przewijaliby 1 px na obrót kółka.
     //
-    // Od wersji 5 protokołu wysyłamy też `axis_source` i `axis_discrete`: GPUI
-    // (Zed) ignoruje `axis` przy źródle „wheel” i przewija na podstawie `discrete`.
+    // Od wersji 5 protokołu wysyłamy też `axis_source` i informację dyskretną:
+    // - v8+: `axis_value120` (jednostka 1/120 ząbka) — tego używają GTK4/Electron/GPUI,
+    // - v5–v7: `axis_discrete` (liczba ząbków).
+    // `axis_discrete` jest przestarzałe od v8 i nie wolno go wysyłać nowszym klientom.
     if ptr.version() >= 5 {
         let _ = ptr.send_event(wl_pointer::Event::AxisSource {
             axis_source: WEnum::Value(wl_pointer::AxisSource::Wheel),
@@ -1123,7 +1126,12 @@ fn pointer_axis(state: &mut State, dx: f64, dy: f64) {
             axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
             value: dy * WHEEL_STEP_PX,
         });
-        if ptr.version() >= 5 {
+        if ptr.version() >= 8 {
+            let _ = ptr.send_event(wl_pointer::Event::AxisValue120 {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value120: (dy * 120.0).round() as i32,
+            });
+        } else if ptr.version() >= 5 {
             let _ = ptr.send_event(wl_pointer::Event::AxisDiscrete {
                 axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
                 discrete: dy.round() as i32,
@@ -1136,7 +1144,12 @@ fn pointer_axis(state: &mut State, dx: f64, dy: f64) {
             axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
             value: dx * WHEEL_STEP_PX,
         });
-        if ptr.version() >= 5 {
+        if ptr.version() >= 8 {
+            let _ = ptr.send_event(wl_pointer::Event::AxisValue120 {
+                axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
+                value120: (dx * 120.0).round() as i32,
+            });
+        } else if ptr.version() >= 5 {
             let _ = ptr.send_event(wl_pointer::Event::AxisDiscrete {
                 axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
                 discrete: dx.round() as i32,

@@ -1,6 +1,6 @@
 [package]
 name = "selene"
-version = "0.0.11"
+version = "0.0.12"
 edition = "2021"
 license = "GPL-3.0-or-later"
 rust-version = "1.80"
@@ -16,11 +16,11 @@ name = "selene"
 path = "src/main.rs"
 
 [dependencies]
-libluna-core = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.7" }
-libluna-render = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.7" }
-libluna-i18n = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.7" }
-libluna-platform = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.7" }
-libluna-widgets = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.7" }
+libluna-core = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.9" }
+libluna-render = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.9" }
+libluna-i18n = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.9" }
+libluna-platform = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.9" }
+libluna-widgets = { git = "https://github.com/LunaDesktop/libLuna.git", version = "0.0.9" }
 
 wayland-server = "0.31"
 wayland-protocols = { version = "0.32", features = ["server", "unstable", "staging"] }

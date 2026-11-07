@@ -20,6 +20,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pkg-config build-essential libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libxcursor-dev libfontconfig1-dev libfreetype6-dev
 
+      # `output.rs` wkompilowuje tapetę przez
+      # `include_bytes!("../../assets/branding/paganlinux.png")`, czyli z katalogu
+      # obok repozytorium. W monorepo istnieje, w pojedynczym repo trzeba go dołożyć.
+      - name: Branding (tapeta)
+        run: |
+          git clone --depth 1 https://github.com/LunaDesktop/branding.git "$RUNNER_TEMP/branding"
+          mkdir -p "$GITHUB_WORKSPACE/../assets/branding"
+          cp "$RUNNER_TEMP/branding/wallpapers/paganlinux.png" "$GITHUB_WORKSPACE/../assets/branding/"
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
