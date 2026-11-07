@@ -31,13 +31,15 @@ use crate::state::{
 };
 use crate::sync::LockExt;
 
-/// Ile pikseli powierzchni odpowiada jednemu „ząbkowi” kółka myszy (`REL_WHEEL`).
+/// Standardowy krok `wl_pointer.axis` dla jednego ząbka rolki (15 px).
 ///
-/// `wl_pointer.axis` przenosi wartości w jednostkach powierzchni, a evdev daje ±1 na
-/// obrót — dlatego mnożymy. [`libluna_core::SCROLL_NOTCH_PX`] to ten sam krok,
-/// którego używają aplikacje libLuny, więc jeden obrót przewija dokładnie wiersz
-/// (a klienty GTK/Electron dostają standardowe ~64 px).
-const WHEEL_STEP_PX: f64 = libluna_core::SCROLL_NOTCH_PX;
+/// Taki krok wysyłają kompozytory libinput/wlroots. Klienty (GTK, Chromium)
+/// oraz XWayland zakładają właśnie 10–15 px; wysyłanie 64 px na ząbek powodowało
+/// u nich przeskok — XWayland dzielił wartość przez 10 i generował kilka
+/// kliknięć rolki naraz. Krok 64 px pozostaje **wewnątrz libLuny**: platforma
+/// sama skaluje standardowe `axis` do [`SCROLL_NOTCH_PX`].
+const WHEEL_AXIS_STEP_PX: f64 = libluna_core::SCROLL_WHEEL_AXIS_PX;
+const SCROLL_NOTCH_PX: f64 = libluna_core::SCROLL_NOTCH_PX;
 
 /// Buduje tekst mapy klawiszy XKB dla danego układu (i opcjonalnego wariantu).
 ///
@@ -413,7 +415,13 @@ pub fn handle_input(state: &mut State, handle: &DisplayHandle, event: &Event) {
                 se.dx = -se.dx;
                 se.dy = -se.dy;
             }
-            pointer_axis(state, se.dx, se.dy)
+            // `Event::Scroll` ma różne jednostki zależnie od backendu:
+            // - DRM/evdev: ząbki (±1 na obrót),
+            // - nested: piksele libLuny ([`SCROLL_NOTCH_PX`] na ząbek).
+            // Sprowadzamy oba do standardowych pikseli Waylanda (15 px/ząbek),
+            // bo tego oczekują zewnętrzne klienty i XWayland.
+            let (dx, dy) = scroll_delta(se.dx, se.dy, state.drm_backend);
+            pointer_axis(state, dx, dy)
         }
         Event::Key(ke) => keyboard_key(state, ke.keysym, ke.keycode, ke.state),
         _ => {}
@@ -1098,6 +1106,22 @@ fn pointer_frame(ptr: &wl_pointer::WlPointer) {
     }
 }
 
+/// Zamienia `Event::Scroll` na standardowe piksele Waylanda (15 px/ząbek).
+///
+/// Evdev w trybie DRM podaje ząbki, a wątek nested — piksele libLuny
+/// ([`SCROLL_NOTCH_PX`] na ząbek). Po normalizacji klienty zewnętrzne
+/// (GTK, Chromium, XWayland) dostają wartości, których się spodziewają.
+fn scroll_delta(dx: f64, dy: f64, drm: bool) -> (f64, f64) {
+    let scale = if drm {
+        WHEEL_AXIS_STEP_PX
+    } else {
+        WHEEL_AXIS_STEP_PX / SCROLL_NOTCH_PX
+    };
+    (dx * scale, dy * scale)
+}
+
+/// Wysyła przewinięcie do klienta w **standardowych pikselach Waylanda**
+/// (15 px = jeden ząbek rolki).
 fn pointer_axis(state: &mut State, dx: f64, dy: f64) {
     state.note_activity();
     let Some((_, surface)) = state.pointer_focus.clone() else {
@@ -1107,11 +1131,10 @@ fn pointer_axis(state: &mut State, dx: f64, dy: f64) {
         return;
     };
     let time = state.time_ms();
-    // `wl_pointer.axis` oczekuje wartości w **jednostkach powierzchni** (pikselach),
-    // a evdev daje „ząbki” (±1). Skalujemy więc ząbek do [`WHEEL_STEP_PX`] px —
-    // inaczej klienci (a nasza powłoka) przewijaliby 1 px na obrót kółka.
-    //
-    // Od wersji 5 protokołu wysyłamy też `axis_source` i informację dyskretną:
+    // `wl_pointer.axis` przenosi wartości w jednostkach powierzchni. Standard
+    // libinput/wlroots to 15 px na ząbek — tyle dostają klienty zewnętrzne,
+    // żeby GTK/Chromium/XWayland przewijały normalnie. Informację dyskretną
+    // wysyłamy osobno:
     // - v8+: `axis_value120` (jednostka 1/120 ząbka) — tego używają GTK4/Electron/GPUI,
     // - v5–v7: `axis_discrete` (liczba ząbków).
     // `axis_discrete` jest przestarzałe od v8 i nie wolno go wysyłać nowszym klientom.
@@ -1120,41 +1143,35 @@ fn pointer_axis(state: &mut State, dx: f64, dy: f64) {
             axis_source: WEnum::Value(wl_pointer::AxisSource::Wheel),
         });
     }
-    if dy != 0.0 {
+    let send = |ptr: &wl_pointer::WlPointer, axis: wl_pointer::Axis, value: f64| {
         let _ = ptr.send_event(wl_pointer::Event::Axis {
             time,
-            axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
-            value: dy * WHEEL_STEP_PX,
+            axis: WEnum::Value(axis),
+            value,
         });
         if ptr.version() >= 8 {
-            let _ = ptr.send_event(wl_pointer::Event::AxisValue120 {
-                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
-                value120: (dy * 120.0).round() as i32,
-            });
+            let value120 = (value / WHEEL_AXIS_STEP_PX * 120.0).round() as i32;
+            if value120 != 0 {
+                let _ = ptr.send_event(wl_pointer::Event::AxisValue120 {
+                    axis: WEnum::Value(axis),
+                    value120,
+                });
+            }
         } else if ptr.version() >= 5 {
-            let _ = ptr.send_event(wl_pointer::Event::AxisDiscrete {
-                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
-                discrete: dy.round() as i32,
-            });
+            let discrete = (value / WHEEL_AXIS_STEP_PX).round() as i32;
+            if discrete != 0 {
+                let _ = ptr.send_event(wl_pointer::Event::AxisDiscrete {
+                    axis: WEnum::Value(axis),
+                    discrete,
+                });
+            }
         }
+    };
+    if dy != 0.0 {
+        send(&ptr, wl_pointer::Axis::VerticalScroll, dy);
     }
     if dx != 0.0 {
-        let _ = ptr.send_event(wl_pointer::Event::Axis {
-            time,
-            axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
-            value: dx * WHEEL_STEP_PX,
-        });
-        if ptr.version() >= 8 {
-            let _ = ptr.send_event(wl_pointer::Event::AxisValue120 {
-                axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
-                value120: (dx * 120.0).round() as i32,
-            });
-        } else if ptr.version() >= 5 {
-            let _ = ptr.send_event(wl_pointer::Event::AxisDiscrete {
-                axis: WEnum::Value(wl_pointer::Axis::HorizontalScroll),
-                discrete: dx.round() as i32,
-            });
-        }
+        send(&ptr, wl_pointer::Axis::HorizontalScroll, dx);
     }
     pointer_frame(&ptr);
 }
@@ -3321,6 +3338,16 @@ mod tests {
         let (rx, _, rw, _) = snap_rect(SnapZone::Right, area, bar);
         assert_eq!(rx, 960.0);
         assert_eq!(rw, 960.0);
+    }
+
+    #[test]
+    fn scroll_delta_uses_standard_wheel_units() {
+        // DRM/evdev: jeden ząbek → 15 px (a nie 64 px, które psuło XWayland).
+        assert_eq!(scroll_delta(1.0, 2.0, true), (15.0, 30.0));
+        // Nested: libLuna podaje 64 px/ząbek → przeliczamy na standardowe 15 px.
+        assert_eq!(scroll_delta(64.0, -64.0, false), (15.0, -15.0));
+        // Gładzik w nested jest w pikselach libLuny, ale zachowuje kierunek.
+        assert_eq!(scroll_delta(7.5, 0.0, false), (7.5 * 15.0 / 64.0, 0.0));
     }
 
     #[test]

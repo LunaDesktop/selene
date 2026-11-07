@@ -208,6 +208,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Wyjście: realne DRM/KMS (gdy `SELENE_BACKEND=drm`) lub nested na nadrzędnym kompozytorze.
     if std::env::var("SELENE_BACKEND").as_deref() == Ok("drm") {
+        state.drm_backend = true;
         // Konsola zostaje w trybie tekstowym, więc Ctrl+C z klawiatury wysyła SIGINT do
         // grupy procesów pierwszego planu VT — czyli do greetd i całej sesji. Przejmujemy
         // pierwszy plan, żeby sygnały z klawiatury trafiały wyłącznie do Selene.

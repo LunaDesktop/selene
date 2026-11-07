@@ -461,6 +461,9 @@ pub struct ResizeState {
 pub struct State {
     /// Start pracy kompozytora — do znaczników czasu (frame callbacks).
     pub start: Instant,
+    /// Czy sesja działa bezpośrednio na DRM/KMS (`SELENE_BACKEND=drm`).
+    /// Wejście evdev podaje wtedy rolkę w ząbkach, a wątek nested — w pikselach.
+    pub drm_backend: bool,
     /// Licznik seriali (dla `xdg_surface.configure` itp.).
     serial: u32,
     /// Liczniki diagnostyczne.
@@ -597,6 +600,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             start: Instant::now(),
+            drm_backend: false,
             serial: 0,
             clients: 0,
             surfaces: 0,
