@@ -300,6 +300,49 @@ fn card_paths() -> Vec<PathBuf> {
     cards
 }
 
+/// Nazwa sterownika DRM dla karty (np. `qxl`, `virtio_gpu`, `i915`).
+fn driver_name(card: &PathBuf) -> Option<String> {
+    let name = card.file_name()?;
+    let link = std::fs::read_link(format!(
+        "/sys/class/drm/{}/device/driver",
+        name.to_string_lossy()
+    ))
+    .ok()?;
+    link.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+}
+
+/// Czy sterownik jest wirtualny (QEMU/SPICE, virtio, VirtualBox, VKMS).
+///
+/// Takie karty nie obsługują `XBGR8888` na płaszczyźnie głównej — akceptują
+/// `ADDFB2`, ale obraz wychodzi z zamienionymi kanałami R/B. Dlatego od razu
+/// wybieramy `XRGB8888` i przepisujemy kanały przy prezentacji (koszt ~1–2 ms
+/// na klatkę 1080p, akceptowalny dla maszyny wirtualnej).
+fn is_virtual_driver(driver: Option<&str>) -> bool {
+    matches!(
+        driver,
+        Some(
+            "qxl"
+                | "virtio_gpu"
+                | "virtio-gpu"
+                | "bochs"
+                | "vboxvideo"
+                | "vkms"
+                | "cirrus"
+                | "mgag200"
+        )
+    )
+}
+
+/// Kolejność formatów bufora scanoutu (pierwszy, który zadziała).
+fn scanout_formats(driver: Option<&str>) -> &'static [u32] {
+    if is_virtual_driver(driver) {
+        &[DRM_FORMAT_XRGB8888]
+    } else {
+        &[DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB8888]
+    }
+}
+
 /// Szczegółowy raport wykrywania (`SELENE_DRM_PROBE=1`).
 ///
 /// Nie zmienia trybu i nie wymaga bycia DRM masterem — wypisuje wszystkie karty,
@@ -698,6 +741,9 @@ pub enum DrmError {
 pub struct DrmBackend {
     fd: OwnedFd,
     outputs: Vec<DrmOutput>,
+    /// Nazwa sterownika karty (`qxl`, `virtio_gpu`, `i915`, …).
+    /// Sterowniki wirtualne nie obsługują `XBGR8888` — patrz [`scanout_formats`].
+    driver: Option<String>,
 }
 
 impl Drop for DrmBackend {
@@ -729,13 +775,26 @@ impl DrmBackend {
                 last = DrmError::Resources;
                 continue;
             };
+            let driver = driver_name(&card);
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!(
+                    "selene/drm: {} sterownik={:?}",
+                    card.display(),
+                    driver.as_deref().unwrap_or("?")
+                );
+            }
             let mut outputs = Vec::new();
             let mut used_crtcs = Vec::new();
             let mut skipped = 0usize;
             for &conn in &res.connectors {
-                if let Some(out) =
-                    setup_output(fd.as_fd(), conn, &res, &mut used_crtcs, preferences)
-                {
+                if let Some(out) = setup_output(
+                    fd.as_fd(),
+                    conn,
+                    &res,
+                    &mut used_crtcs,
+                    preferences,
+                    driver.as_deref(),
+                ) {
                     outputs.push(out);
                 } else {
                     skipped += 1;
@@ -754,7 +813,11 @@ impl DrmBackend {
                 last = DrmError::NoOutputs;
                 continue;
             }
-            return Ok(Self { fd, outputs });
+            return Ok(Self {
+                fd,
+                outputs,
+                driver,
+            });
         }
         Err(last)
     }
@@ -837,25 +900,30 @@ impl DrmBackend {
 
         let width = mode.hdisplay as u32;
         let height = mode.vdisplay as u32;
-        let mut swizzle = false;
         let make_pair = |format: u32| -> Option<(DumbBuffer, DumbBuffer)> {
             Some((
                 create_dumb(fd, width, height, format)?,
                 create_dumb(fd, width, height, format)?,
             ))
         };
-        let (b0, b1) = match make_pair(DRM_FORMAT_XBGR8888) {
-            Some(pair) => pair,
-            None => {
-                swizzle = true;
-                make_pair(DRM_FORMAT_XRGB8888)?
+        // Ta sama kolejność formatów co przy starcie: karty wirtualne (QXL)
+        // potrzebują `XRGB8888` z przepisaniem kanałów.
+        let mut chosen = None;
+        for &format in scanout_formats(self.driver.as_deref()) {
+            let Some((b0, b1)) = make_pair(format) else {
+                continue;
+            };
+            if set_crtc(fd, crtc_id, b0.fb_id, connector_id, &mode) {
+                chosen = Some((format, b0, b1));
+                break;
             }
-        };
-        if !set_crtc(fd, crtc_id, b0.fb_id, connector_id, &mode) {
             destroy_fb(fd, b0.fb_id);
             destroy_fb(fd, b1.fb_id);
-            return None;
+            destroy_dumb(fd, b0.handle);
+            destroy_dumb(fd, b1.handle);
         }
+        let (format, b0, b1) = chosen?;
+        let swizzle = format == DRM_FORMAT_XRGB8888;
 
         let out = &mut self.outputs[index];
         for old in &out.buffers {
@@ -1040,6 +1108,7 @@ fn setup_output(
     res: &Resources,
     used_crtcs: &mut Vec<u32>,
     preferences: &DisplaySettings,
+    driver: Option<&str>,
 ) -> Option<DrmOutput> {
     let c = ioctl_rw::<ModeGetConnector, DRM_IOCTL_MODE_GETCONNECTOR, _>(
         fd,
@@ -1116,38 +1185,47 @@ fn setup_output(
 
     let width = mode.hdisplay as u32;
     let height = mode.vdisplay as u32;
-    // Preferujemy `XBGR8888`: pamięć to R,G,B,X, czyli dokładnie wyjście tiny-skia.
-    // `present` kopiuje wtedy wiersze bez przepisywania kanałów (oszczędność ~1–2 ms
-    // na klatkę 1080p). Gdy sterownik nie wspiera formatu — wracamy do `XRGB8888`.
-    let mut swizzle = false;
     let make_pair = |fmt: u32| -> Option<(DumbBuffer, DumbBuffer)> {
         Some((
             create_dumb(fd, width, height, fmt)?,
             create_dumb(fd, width, height, fmt)?,
         ))
     };
-    let (b0, b1) = match make_pair(DRM_FORMAT_XBGR8888) {
-        Some(pair) => pair,
-        None => {
-            swizzle = true;
-            make_pair(DRM_FORMAT_XRGB8888)?
-        }
-    };
 
-    let mut crtc_id = None;
-    for cand in candidates {
-        if used_crtcs.contains(&cand) {
+    // Preferujemy `XBGR8888`: pamięć to R,G,B,X, czyli dokładnie wyjście tiny-skia
+    // (`present` kopiuje wiersze bez przepisywania kanałów). Karty wirtualne
+    // (QXL/SPICE, virtio, VKMS) obsługują tylko `XRGB8888` — tam od razu
+    // wybieramy ten format i przepisujemy kanały. Gdy sterownik odrzuci
+    // `XBGR8888` przy `SETCRTC`, próbujemy kolejnego formatu.
+    let mut placed = None;
+    for &format in scanout_formats(driver) {
+        let Some((b0, b1)) = make_pair(format) else {
             continue;
+        };
+        let mut crtc_id = None;
+        for &cand in &candidates {
+            if used_crtcs.contains(&cand) {
+                continue;
+            }
+            if set_crtc(fd, cand, b0.fb_id, conn_id, &mode) {
+                crtc_id = Some(cand);
+                break;
+            }
+            if std::env::var("SELENE_STATS").is_ok() {
+                eprintln!("selene/drm: CRTC {cand} odrzucił tryb — próbuję następny");
+            }
         }
-        if set_crtc(fd, cand, b0.fb_id, conn_id, &mode) {
-            crtc_id = Some(cand);
+        if let Some(crtc_id) = crtc_id {
+            placed = Some((format, crtc_id, b0, b1));
             break;
         }
-        if std::env::var("SELENE_STATS").is_ok() {
-            eprintln!("selene/drm: CRTC {cand} zajęty — próbuję następny");
-        }
+        // Ten format nie zadziałał — zwolnij bufor i framebuffer, spróbuj następnego.
+        destroy_fb(fd, b0.fb_id);
+        destroy_fb(fd, b1.fb_id);
+        destroy_dumb(fd, b0.handle);
+        destroy_dumb(fd, b1.handle);
     }
-    let crtc_id = crtc_id?;
+    let (format, crtc_id, b0, b1) = placed?;
     // CRTC oznaczamy jako użyty **dopiero po udanym** `set_crtc`.
     used_crtcs.push(crtc_id);
     Some(DrmOutput {
@@ -1162,7 +1240,7 @@ fn setup_output(
         raw_modes: modes,
         buffers: [b0, b1],
         front: 0,
-        swizzle,
+        swizzle: format == DRM_FORMAT_XRGB8888,
         cursor: None,
     })
 }
@@ -1379,6 +1457,32 @@ fn copy_rows_into(dst: *mut u8, pitch: usize, rgba: &[u8], width: usize, height:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qxl_uses_xrgb_scanout() {
+        // QXL/SPICE nie obsługuje XBGR8888 — bufory muszą być XRGB8888
+        // (z przepisaniem kanałów przy prezentacji).
+        assert!(is_virtual_driver(Some("qxl")));
+        assert_eq!(scanout_formats(Some("qxl")), &[DRM_FORMAT_XRGB8888]);
+        assert_eq!(
+            scanout_formats(Some("virtio_gpu")),
+            &[DRM_FORMAT_XRGB8888]
+        );
+    }
+
+    #[test]
+    fn real_gpu_prefers_xbgr_with_xrgb_fallback() {
+        assert!(!is_virtual_driver(Some("i915")));
+        assert_eq!(
+            scanout_formats(Some("i915")),
+            &[DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB8888]
+        );
+        // Brak informacji o sterowniku = zachowujemy dotychczasową kolejność.
+        assert_eq!(
+            scanout_formats(None),
+            &[DRM_FORMAT_XBGR8888, DRM_FORMAT_XRGB8888]
+        );
+    }
 
     #[test]
     fn connector_names_follow_wayland_convention() {
