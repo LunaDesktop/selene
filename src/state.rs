@@ -548,6 +548,9 @@ pub struct State {
     pub idle_lock_fired: bool,
     /// Usypianie z powodu bezczynności już wystartowało (zapadka).
     pub idle_suspend_fired: bool,
+    /// Chwila zgłoszenia uśpienia — czekamy z `systemctl suspend` aż ekran blokady
+    /// zdąży się pokazać (albo minie limit, gdy locker jest niedostępny).
+    pub idle_suspend_request: Option<Instant>,
     /// Sesja zablokowana przez `luna-lock` (overlay + klawiatura wyłączna).
     /// Blokujemy wtedy globalne skróty kompozytora i podgląd okien.
     pub locked: bool,
@@ -654,6 +657,7 @@ impl Default for State {
             idle_last_input: Instant::now(),
             idle_lock_fired: false,
             idle_suspend_fired: false,
+            idle_suspend_request: None,
         }
     }
 }
@@ -784,6 +788,8 @@ impl State {
     pub fn note_activity(&mut self) {
         self.idle_last_input = Instant::now();
         self.idle_suspend_fired = false;
+        // Ruch/klawisz anuluje oczekujące uśpienie, zanim zdążyło wystartować.
+        self.idle_suspend_request = None;
         if !self.locked {
             self.idle_lock_fired = false;
         }

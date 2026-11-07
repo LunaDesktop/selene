@@ -780,6 +780,38 @@ impl DrmBackend {
         self.outputs.iter().any(|o| o.gamma_size > 0)
     }
 
+    /// Po powrocie z uśpienia: odzyskaj mastera DRM i odtwórz tryb na wyjściach.
+    ///
+    /// Jądro po suspend/resume może zgubić stan CRTC albo mastera DRM. Ponawiamy
+    /// `SET_MASTER` (na już-istniejącym masterze zwraca błąd — ignorujemy go)
+    /// i robimy modeset na bieżącym buforze każdego monitora.
+    pub fn resume(&mut self) -> bool {
+        let fd = self.fd.as_fd();
+        let _ = ioctl_none::<DRM_IOCTL_SET_MASTER, _>(&fd);
+        let mut ok = true;
+        for out in &mut self.outputs {
+            let wanted = OutputMode::new(
+                out.width as u16,
+                out.height as u16,
+                out.hz as u16,
+            );
+            let Some(mode) = pick_mode(&out.raw_modes, Some(wanted)).copied() else {
+                ok = false;
+                continue;
+            };
+            if !set_crtc(
+                fd,
+                out.crtc_id,
+                out.buffers[out.front].fb_id,
+                out.connector_id,
+                &mode,
+            ) {
+                ok = false;
+            }
+        }
+        ok
+    }
+
     /// Zmienia tryb wyjścia **na żywo** (bez restartu sesji).
     ///
     /// Tworzy nowe bufory i framebuffery, przepina CRTC i dopiero po sukcesie
@@ -898,7 +930,18 @@ impl DrmBackend {
     }
 
     /// Czeka na zakończenie page-flipu (zdarzenie z jądra).
+    ///
+    /// Po suspend/resume zdarzenie flipa potrafi nigdy nie przyjść — wcześniej
+    /// `read` na blokującym deskryptorze wisiał wtedy w nieskończoność i ekran
+    /// zostawał czarny. Dlatego czekamy przez `poll` z limitem czasu.
     pub fn wait_flip(&self) {
+        use rustix::event::{poll, PollFd, PollFlags};
+        let mut fds = [PollFd::new(&self.fd, PollFlags::IN)];
+        match poll(&mut fds, 200) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(_) => return,
+        }
         let mut buf = [0u8; 32];
         loop {
             match rustix::io::read(&self.fd, &mut buf) {

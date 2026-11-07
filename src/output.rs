@@ -414,7 +414,45 @@ pub fn spawn_drm(
         let mut applied_night: Option<u8> = None;
         let mut applied_power = false;
         let mut last_present = std::time::Instant::now();
+        // Wykrywanie powrotu z uśpienia: pętla po suspendzie wznawia się po
+        // wielosekundowej przerwie. Jądro mogło zgubić stan CRTC, a zdarzenia
+        // flipów sprzed snu nie dotyczą już nowych klatek.
+        let mut last_loop = std::time::Instant::now();
         loop {
+            let now = std::time::Instant::now();
+            if now.duration_since(last_loop) > Duration::from_secs(2) {
+                eprintln!(
+                    "selene/drm: powrót z uśpienia ({:.1}s) — odtwarzam tryb",
+                    now.duration_since(last_loop).as_secs_f64()
+                );
+                if !backend.resume() {
+                    eprintln!("selene/drm: modeset po wybudzeniu nie powiódł się — próbuję dalej");
+                }
+                last_sigs = vec![None; sizes.len()];
+                cursor_shown = vec![false; sizes.len()];
+                applied_night = None;
+                applied_power = false;
+                flip_error_logged = false;
+                // Płaszczyzna kursora też została zresetowana przez resume.
+                hw_cursor = crate::cursor::fits_hardware(&cursor_gfx);
+                for i in 0..sizes.len() {
+                    if !hw_cursor
+                        || !backend.set_cursor_image(
+                            i,
+                            &cursor_gfx.rgba,
+                            cursor_gfx.width,
+                            cursor_gfx.height,
+                            0,
+                            0,
+                        )
+                        || !backend.hide_cursor(i)
+                    {
+                        hw_cursor = false;
+                    }
+                }
+                last_present = now;
+            }
+            last_loop = now;
             // Motyw użytkownika mógł się zmienić (demo/Ustawienia) — odśwież, gdy inny.
             if theme_checked.elapsed() >= Duration::from_secs(2) {
                 theme_checked = std::time::Instant::now();

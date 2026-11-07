@@ -1524,13 +1524,32 @@ pub(crate) fn tick_idle(state: &mut State) {
                     state.idle_lock_fired = true;
                     spawn_lock();
                 }
-                let _ = Command::new("systemctl")
-                    .arg("suspend")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
+                // Nie usypiamy natychmiast: najpierw ekran blokady musi zdążyć
+                // się pokazać. Wcześniej `systemctl suspend` wyprzedzał pierwszy
+                // commit `luna-lock` i po wybudzeniu nie było czego pokazać.
+                state.idle_suspend_request = Some(Instant::now());
             }
+        }
+    }
+
+    // Odroczone uśpienie: czekamy na blokadę (min. 400 ms na klatkę) albo
+    // na limit 4 s, gdy locker nie wystartuje. Bez tego wybudzenie kończyło
+    // się czarnym ekranem.
+    if let Some(since) = state.idle_suspend_request {
+        let waited = since.elapsed();
+        let lock_ready = state.locked && waited >= Duration::from_millis(400);
+        let timeout = waited >= Duration::from_secs(4);
+        if lock_ready || timeout {
+            state.idle_suspend_request = None;
+            if !state.locked {
+                eprintln!("selene/idle: ekran blokady nie wystartował — usypiam mimo to");
+            }
+            let _ = Command::new("systemctl")
+                .arg("suspend")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
         }
     }
 }
