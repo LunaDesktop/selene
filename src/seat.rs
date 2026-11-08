@@ -600,11 +600,14 @@ fn input_region_hit(w: &crate::state::Window, pos: Point) -> Option<bool> {
 /// jej widoczną treścią. Używane, gdy powłoka ma otwarty popup/launcher: klik gdzieś
 /// indziej (pulpit, drugi monitor, dolna część ekranu) ma zamknąć popup, a nie
 /// aktywować okno pod spodem.
+/// Warstwy tła (`z < 0`, np. ikony pulpitu) **nigdy** nie przechwytują kliknięć:
+/// ich powierzchnia pokrywa tylko jeden monitor, więc bez tego warunku każde
+/// kliknięcie na drugim wyjściu trafiałoby do pulpitu zamiast do okna.
 fn capturing_layer_outside(state: &State, pos: Point) -> Option<usize> {
     let windows = state.windows.lock_or_recover();
-    windows
-        .iter()
-        .position(|w| w.layer && w.mapped && w.input_capture && !w.outer().contains(pos))
+    windows.iter().position(|w| {
+        w.layer && w.mapped && w.input_capture && w.z > 0 && !w.outer().contains(pos)
+    })
 }
 
 fn window_geometry(state: &State, slot: usize) -> Option<(f64, f64, f64, f64)> {
@@ -3055,6 +3058,23 @@ mod tests {
         );
         s.windows.lock_or_recover()[0].input_capture = false;
         assert_eq!(capturing_layer_outside(&s, Point::new(900.0, 900.0)), None);
+    }
+
+    #[test]
+    fn background_layer_never_captures_clicks_on_other_outputs() {
+        // Pulpit (warstwa tła, z < 0) pokrywa tylko pierwszy monitor. Klik na
+        // drugim wyjściu nie może być przekierowany do pulpitu.
+        let s = State::default();
+        let mut w = sample_window();
+        w.layer = true;
+        w.input_capture = true;
+        w.z = -200;
+        w.x = 0.0;
+        w.y = 0.0;
+        w.width = 1920;
+        w.height = 1080;
+        s.windows.lock_or_recover().push(w);
+        assert_eq!(capturing_layer_outside(&s, Point::new(2400.0, 500.0)), None);
     }
 
     #[test]
